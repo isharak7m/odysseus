@@ -4,12 +4,27 @@ Verifies that POST /model-endpoints/test and POST /model-endpoints reject
 user-supplied URLs that resolve to link-local (cloud metadata), non-HTTP
 schemes, or (when MODELENDPOINT_BLOCK_PRIVATE_IPS=true) private/loopback
 addresses — matching the existing SSRF guard pattern in embedding_routes.py.
+
+A stub resolver is injected so the loopback tests never touch real DNS.
 """
 import os
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+# ── Resolver stub (same pattern as tests/test_url_safety.py) ────────────────
+def _resolver(mapping):
+    """Create a stub resolver for deterministic DNS in tests."""
+    def resolve(host):
+        if host in mapping:
+            return mapping[host]
+        raise OSError(f"unresolvable: {host}")
+    return resolve
+
+
+LOCALHOST_V4 = _resolver({"localhost": ["127.0.0.1"]})
 
 
 @pytest.fixture
@@ -77,17 +92,32 @@ class TestModelEndpointSSRF:
         assert resp.status_code == 400
         assert "Rejected" in resp.json()["detail"]
 
-    def test_loopback_always_rejected(self, client):
-        """Loopback addresses are always rejected (not just in strict mode)."""
-        resp = client.post(
-            "/api/model-endpoints/test",
-            data={"base_url": "http://localhost:11434/v1"},
-        )
-        assert resp.status_code == 400
-        assert "Rejected" in resp.json()["detail"]
+    def test_loopback_accepted_by_default(self, client):
+        """Local-first: loopback is accepted when block_private=False."""
+        with patch("src.url_safety._default_resolver", LOCALHOST_V4):
+            resp = client.post(
+                "/api/model-endpoints/test",
+                data={"base_url": "http://localhost:11434/v1"},
+            )
+            # Guard passes; probe fails (no server) but that is not SSRF.
+            assert "Rejected endpoint URL" not in str(resp.json())
 
-    def test_strict_mode_blocks_loopback(self, client):
-        """MODELENDPOINT_BLOCK_PRIVATE_IPS=true blocks loopback."""
+    def test_loopback_rejected_in_strict_mode(self, client):
+        """Strict mode: loopback is rejected when block_private=True."""
+        os.environ["MODELENDPOINT_BLOCK_PRIVATE_IPS"] = "true"
+        try:
+            with patch("src.url_safety._default_resolver", LOCALHOST_V4):
+                resp = client.post(
+                    "/api/model-endpoints/test",
+                    data={"base_url": "http://localhost:11434/v1"},
+                )
+                assert resp.status_code == 400
+                assert "Rejected" in resp.json()["detail"]
+        finally:
+            os.environ.pop("MODELENDPOINT_BLOCK_PRIVATE_IPS", None)
+
+    def test_strict_mode_blocks_direct_loopback_ip(self, client):
+        """Strict mode rejects 127.0.0.1 passed directly (no DNS needed)."""
         os.environ["MODELENDPOINT_BLOCK_PRIVATE_IPS"] = "true"
         try:
             resp = client.post(
@@ -121,11 +151,28 @@ class TestModelEndpointCreateSSRF:
         assert resp.status_code == 400
         assert "Rejected" in resp.json()["detail"]
 
-    def test_loopback_always_rejected(self, client):
-        """Loopback addresses are always rejected (not just in strict mode)."""
-        resp = client.post(
-            "/api/model-endpoints",
-            data={"base_url": "http://localhost:11434/v1"},
-        )
-        assert resp.status_code == 400
-        assert "Rejected" in resp.json()["detail"]
+    def test_loopback_accepted_by_default(self, client):
+        """Local-first: loopback is accepted when block_private=False."""
+        with patch("src.url_safety._default_resolver", LOCALHOST_V4):
+            resp = client.post(
+                "/api/model-endpoints",
+                data={"base_url": "http://localhost:11434/v1"},
+            )
+            # Guard passes; route may 500 on DB/probe but never 400 SSRF.
+            assert resp.status_code != 400
+            body = resp.text if resp.status_code == 500 else str(resp.json())
+            assert "Rejected endpoint URL" not in body
+
+    def test_loopback_rejected_in_strict_mode(self, client):
+        """Strict mode: loopback is rejected when block_private=True."""
+        os.environ["MODELENDPOINT_BLOCK_PRIVATE_IPS"] = "true"
+        try:
+            with patch("src.url_safety._default_resolver", LOCALHOST_V4):
+                resp = client.post(
+                    "/api/model-endpoints",
+                    data={"base_url": "http://localhost:11434/v1"},
+                )
+                assert resp.status_code == 400
+                assert "Rejected" in resp.json()["detail"]
+        finally:
+            os.environ.pop("MODELENDPOINT_BLOCK_PRIVATE_IPS", None)
