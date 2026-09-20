@@ -4,6 +4,8 @@ import os
 import re
 import difflib
 import shutil
+import tempfile
+import threading
 import time
 from typing import Optional, Dict, Any, Tuple, List
 
@@ -179,6 +181,88 @@ def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
         "file": os.path.basename(path) or (path or "file"),
     }
 
+
+_umask_lock = threading.Lock()
+
+
+def _atomic_write(path: str, content: str) -> None:
+    """Atomically write *content* to *path*.
+
+    Writes to a temporary file in the same directory, fsyncs, then renames
+    over the target.  On NFS this avoids the case where a plain
+    write-then-close reports success before data reaches stable storage.
+
+    If *path* already exists its permissions are preserved.  The parent
+    directory is fsynced so the rename itself is durable.
+
+    Thread note: the umask read is locked, but os.umask is process-global so
+    any external caller that bypasses this lock may still race with it.
+    """
+    directory = os.path.dirname(path) or "."
+
+    # Preserve existing permissions (mkstemp creates with 0o600).
+    try:
+        old_stat = os.stat(path)
+        old_mode = old_stat.st_mode
+    except OSError:
+        old_mode = None
+
+    fd = -1
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".odysseus-tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1  # fd is now owned by the file object
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+
+        if old_mode is not None:
+            os.chmod(tmp_path, old_mode)
+        else:
+            # New file — apply umask-respecting default (0o666 & ~umask).
+            # os.umask is process-wide; lock so a concurrent thread doesn't
+            # momentarily see umask=0 and create a world-writable file.
+            with _umask_lock:
+                saved = os.umask(0)
+                os.umask(saved)
+            os.chmod(tmp_path, 0o666 & ~saved)
+
+        os.replace(tmp_path, path)
+
+        # fsync the parent directory so the rename entry itself is durable.
+        # On ext4/xfs this flushes the directory metadata so a crash won't
+        # lose the new directory entry.  On NFS directory operations are
+        # synchronous RPCs so this is effectively a no-op, but it costs
+        # nothing and keeps the code correct across all filesystems.
+        # On Windows or restricted permissions this may fail — acceptable
+        # since the file-level fsync above provides the primary guarantee.
+        try:
+            parent_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        except OSError:
+            pass
+    except Exception:
+        # Clean up temp file on any failure.
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+    finally:
+        # Close fd if os.fdopen was never called (mkstemp succeeded but
+        # fdopen failed or wasn't reached).
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 class EditFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
@@ -211,8 +295,7 @@ class EditFileTool:
             if count > 1 and not replace_all:
                 return original, None, f"not_unique:{count}"
             updated = original.replace(old, new) if replace_all else original.replace(old, new, 1)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(updated)
+            _atomic_write(path, updated)
             return original, updated, "ok"
 
         try:
@@ -325,8 +408,7 @@ class WriteFileTool:
                 d = os.path.dirname(path)
                 if d:
                     os.makedirs(d, exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(body)
+                _atomic_write(path, body)
                 return old, len(body)
             old_content, size = await asyncio.to_thread(_write)
         except PermissionError:
@@ -397,8 +479,7 @@ class ApplyPatchTool:
                     directory = os.path.dirname(path)
                     if directory:
                         os.makedirs(directory, exist_ok=True)
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(new)
+                    _atomic_write(path, new)
                 diff = _unified_diff(old, new, path)
                 if diff:
                     diffs.append(diff)
