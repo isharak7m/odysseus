@@ -3168,7 +3168,7 @@ def _compute_final_metrics(
     elif has_real_usage:
         ctx_tokens = real_input_tokens
     else:
-        ctx_tokens = estimate_tokens(messages)
+        ctx_tokens = estimate_tokens(messages, model)
     ctx_pct = min(round((ctx_tokens / context_length) * 100, 1), 100.0) if context_length else 0
 
     metrics = {
@@ -3564,7 +3564,7 @@ async def stream_agent_loop(
         metrics = {
             "model": model,
             "requested_model": model,
-            "input_tokens": estimate_tokens(messages),
+            "input_tokens": estimate_tokens(messages, model),
             "output_tokens": max(len(msg) // 4, 1),
             "total_time": 0,
             "response_time": 0,
@@ -4934,7 +4934,7 @@ async def stream_agent_loop(
             round_num,
             model,
             endpoint_url,
-            estimate_tokens(messages),
+            estimate_tokens(messages, model),
             len(_tool_names_sent),
             bool(all_tool_schemas),
             agent_stream_timeout,
@@ -6382,7 +6382,7 @@ async def stream_agent_loop(
 
     # --- Final metrics ---
     total_duration = time.time() - total_start
-    final_context_tokens = estimate_tokens(messages)
+    final_context_tokens = estimate_tokens(messages, actual_model)
     metrics = _compute_final_metrics(
         _last_route_request_messages, full_response, total_duration, time_to_first_token,
         _last_route_context_length, real_input_tokens, real_output_tokens,

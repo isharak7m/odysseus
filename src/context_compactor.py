@@ -221,7 +221,7 @@ def _truncate_message_to_token_budget(msg: Dict[str, Any], token_budget: int) ->
     return _truncate_tool_call_args(out, token_budget)
 
 
-def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: int = 512) -> List[Dict]:
+def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: int = 512, model: str = "") -> List[Dict]:
     """Trim system messages to fit within context_length.
 
     For small-context models, progressively strips:
@@ -230,7 +230,7 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
     Reserves space for the response.
     """
     budget = context_length - reserve_tokens
-    used = estimate_tokens(messages)
+    used = estimate_tokens(messages, model)
     if used <= budget:
         return messages
 
@@ -336,7 +336,7 @@ async def maybe_compact(
     Returns (messages, context_length, was_compacted).
     """
     context_length = get_context_length(endpoint_url, model)
-    used = estimate_tokens(messages)
+    used = estimate_tokens(messages, model)
     pct = (used / context_length) * 100 if context_length else 0
 
     if pct < COMPACT_THRESHOLD * 100:
