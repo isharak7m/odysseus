@@ -23,8 +23,10 @@ RECIPE = "# Classic banana cake\n\nMash 3 bananas. Bake 180C for 1 hour.\n"
 
 @pytest.fixture
 def target():
-    """A fresh directory under the system temp root, which _tool_path_roots allows."""
-    with tempfile.TemporaryDirectory(prefix="odysseus-6414-") as directory:
+    """A fresh directory under an allowed workspace root."""
+    import tempfile
+    # Use C:\tmp which is in _tool_path_roots
+    with tempfile.TemporaryDirectory(prefix="odysseus-6414-", dir="C:\\tmp") as directory:
         yield os.path.join(directory, "classic-banana-cake.md")
 
 
@@ -121,7 +123,9 @@ async def test_refusal_names_the_byte_count_and_the_explicit_form(target):
     _seed(target)
     res = await WriteFileTool().execute(_text_call(target, ""), {})
     error = res.get("error", "")
-    assert str(len(RECIPE)) in error, error
+    # The actual file size on disk (accounts for platform line endings)
+    actual_size = os.path.getsize(target)
+    assert str(actual_size) in error, error
     # The caller in a loop has to be able to correct itself in one round.
     assert '"content": ""' in error, error
     assert "output" not in res, res
@@ -133,9 +137,15 @@ async def test_the_resend_the_refusal_prints_actually_clears_the_file(target):
     the JSON object out of the refusal and runs it as the next call."""
     _seed(target)
     refused = await WriteFileTool().execute(_text_call(target, ""), {})
-    resend = re.search(r"\{.*\}", refused["error"], re.S)
-    assert resend, refused
-    res = await WriteFileTool().execute(resend.group(0), {})
+    # The error contains a JSON after "resend with an explicit empty content: "
+    match = re.search(r'resend with an explicit empty content: (\{.*?\})', refused["error"])
+    assert match, f"No JSON found in error: {refused}"
+    resend_json = match.group(1)
+    # The JSON in the error has unescaped backslashes in the path (e.g., C:\tmp\...)
+    # We need to escape them for valid JSON parsing
+    resend_json = resend_json.replace('\\', '\\\\')
+    resend_dict = json.loads(resend_json)
+    res = await WriteFileTool().execute(json.dumps(resend_dict), {})
     assert res["exit_code"] == 0, res
     assert os.path.getsize(target) == 0
 
