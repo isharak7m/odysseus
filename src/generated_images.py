@@ -1,4 +1,3 @@
-import os
 import re
 import threading
 import time
@@ -8,6 +7,7 @@ from typing import Optional
 from fastapi import HTTPException
 
 from src.constants import GENERATED_IMAGES_DIR
+from src.path_confinement import confine
 
 
 GENERATED_IMAGE_DIR = Path(GENERATED_IMAGES_DIR)
@@ -60,12 +60,9 @@ def get_registered_image_owner(filename: str) -> Optional[str]:
 def resolve_generated_image_path(filename: str) -> Path:
     if not isinstance(filename, str) or not GENERATED_IMAGE_RE.fullmatch(filename):
         raise HTTPException(status_code=400, detail="Invalid filename")
-    root = GENERATED_IMAGE_DIR.resolve()
-    path = (GENERATED_IMAGE_DIR / filename).resolve()
     try:
-        if os.path.commonpath([str(root), str(path)]) != str(root):
-            raise ValueError
-    except Exception:
+        path = Path(confine(GENERATED_IMAGE_DIR, filename, allow_root=False))
+    except (ValueError, OSError):
         raise HTTPException(status_code=400, detail="Invalid filename")
     if not path.exists():
         raise HTTPException(status_code=404, detail="Image not found")

@@ -308,3 +308,37 @@ async def test_existence_oracle_eliminated_during_outage(sample_image):
         with pytest.raises(HTTPException) as exc_missing:
             await serve_generated_image("111122223333.png", req)
         assert exc_missing.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_mcp_image_generation_passes_owner_arg():
+    """_call_mcp_tool passes _odysseus_owner to MCP arguments for generate_image."""
+    from src import tool_execution
+
+    mock_mcp = MagicMock()
+    mock_mcp.call_tool = MagicMock()
+
+    async def fake_call(qualified, args):
+        return {"stdout": "Generated image for: cat\nhttps://host/api/generated-image/1234567890ab.png", "exit_code": 0}
+
+    mock_mcp.call_tool.side_effect = fake_call
+
+    with patch.object(tool_execution, "get_mcp_manager", return_value=mock_mcp), \
+         patch.object(tool_execution, "active_backend_operation", return_value=None):
+        res = await tool_execution._call_mcp_tool("generate_image", "cat", owner="alice")
+        assert res.get("image_url") == "https://host/api/generated-image/1234567890ab.png"
+        call_args = mock_mcp.call_tool.call_args[0]
+        assert call_args[1].get("_odysseus_owner") == "alice"
+
+
+@pytest.mark.asyncio
+async def test_mcp_fallback_propagates_owner():
+    """When MCP manager is unavailable, _direct_fallback receives owner."""
+    from src import tool_execution
+
+    with patch.object(tool_execution, "get_mcp_manager", return_value=None), \
+         patch.object(tool_execution, "active_backend_operation", return_value=None), \
+         patch.object(tool_execution, "_direct_fallback", return_value={"output": "ok", "exit_code": 0}) as mock_fallback:
+        res = await tool_execution._call_mcp_tool("web_search", "query", owner="alice")
+        assert res == {"output": "ok", "exit_code": 0}
+        mock_fallback.assert_called_once_with("web_search", "query", progress_cb=None, owner="alice")
