@@ -1317,7 +1317,8 @@ def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[s
         if tool.startswith("mcp__email__"):
             return {}, "Email MCP tool arguments must be a JSON object."
         return {}, None
-    return parsed, None
+    sanitized = {k: v for k, v in parsed.items() if not k.startswith("_odysseus_")}
+    return sanitized, None
 
 
 def _parse_generate_image(content: str) -> Dict:
@@ -1402,9 +1403,12 @@ def _build_mcp_args(tool: str, content: str) -> Dict:
         except (json.JSONDecodeError, TypeError):
             decoded = None
         if isinstance(decoded, dict) and any(k in decoded for k in primaries):
-            return decoded
+            return {k: v for k, v in decoded.items() if not k.startswith("_odysseus_")}
     parser = _MCP_ARG_PARSERS.get(tool)
-    return parser(content) if parser else {}
+    res = parser(content) if parser else {}
+    if isinstance(res, dict):
+        return {k: v for k, v in res.items() if not k.startswith("_odysseus_")}
+    return res
 
 
 def _normalize_mcp_text_error(result: Dict) -> Dict:
@@ -1436,8 +1440,10 @@ async def _call_mcp_tool(
     server_id, tool_name = _MCP_TOOL_MAP[tool]
     qualified = f"mcp__{server_id}__{tool_name}"
     args = _build_mcp_args(tool, content)
-    if tool == "generate_image" and owner:
-        args["_odysseus_owner"] = owner
+    if tool == "generate_image":
+        args.pop("_odysseus_owner", None)
+        if owner:
+            args["_odysseus_owner"] = owner
     result = await mcp.call_tool(qualified, args)
 
     # Stdio MCP servers can only return TextContent, so an explicit
@@ -2382,7 +2388,7 @@ async def _execute_tool_block_impl(
                     )
                 else:
                     if isinstance(parsed, dict):
-                        args = parsed
+                        args = {k: v for k, v in parsed.items() if not k.startswith("_odysseus_")}
                     else:
                         _args_error = (
                             f"'{tool}' arguments must be a JSON object, "
@@ -2391,11 +2397,12 @@ async def _execute_tool_block_impl(
             if _args_error is not None:
                 result = {"error": _args_error, "exit_code": 1}
             else:
+                args = dict(args)
+                args.pop(_EMAIL_MCP_OWNER_ARG, None)
+                args.pop(_EMAIL_MCP_SESSION_ARG, None)
                 if owner:
-                    args = dict(args)
                     args[_EMAIL_MCP_OWNER_ARG] = owner
                 if session_id:
-                    args = dict(args)
                     args[_EMAIL_MCP_SESSION_ARG] = session_id
                 result = await dispatched(mcp.call_tool(qualified, args))
         else:
@@ -2409,14 +2416,20 @@ async def _execute_tool_block_impl(
             if parse_error:
                 result = {"error": parse_error, "exit_code": 1}
             else:
+                args = dict(args)
+                args.pop("_odysseus_owner", None)
+                args.pop("_odysseus_session_id", None)
                 if tool.startswith("mcp__email__"):
                     if owner:
-                        args = dict(args)
                         args[_EMAIL_MCP_OWNER_ARG] = owner
                     if session_id:
-                        args = dict(args)
                         args[_EMAIL_MCP_SESSION_ARG] = session_id
+                elif tool == "mcp__image_gen__generate_image" or tool.startswith("mcp__image_gen__"):
+                    if owner:
+                        args["_odysseus_owner"] = owner
                 result = _normalize_mcp_text_error(await dispatched(mcp.call_tool(tool, args)))
+                if tool == "mcp__image_gen__generate_image" or tool.startswith("mcp__image_gen__"):
+                    _promote_image_fields(result)
         else:
             desc = f"mcp: {tool}"
             result = {"error": "MCP manager not available", "exit_code": 1}
