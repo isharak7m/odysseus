@@ -184,7 +184,7 @@ async def do_vault_unlock(content: str, owner: Optional[str] = None) -> Dict:
     cfg["session"] = session
     from datetime import datetime as _dt
     cfg["unlocked_at"] = _dt.utcnow().isoformat()
-    atomic_write_json(str(p), cfg, indent=2)
+    atomic_write_json(str(p), cfg, indent=2, file_mode=0o600)
     try:
         import os as _os
         _os.chmod(str(p), 0o600)
