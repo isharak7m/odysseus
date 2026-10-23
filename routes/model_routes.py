@@ -2913,6 +2913,16 @@ def setup_model_routes(model_discovery):
                             _new_base = _new_base[: -len(_suffix)].rstrip("/")
                     _new_base = _normalize_base(_new_base)
                     if _new_base:
+                        # SSRF hardening: PATCH rewrites the stored base_url, so
+                        # it needs the same guard as POST create/test — no
+                        # bypass through the update path. Follow-up fetches
+                        # rely on httpx's default follow_redirects=False.
+                        ok, reason = check_outbound_url(
+                            _new_base,
+                            block_private=os.getenv("MODELENDPOINT_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+                        )
+                        if not ok:
+                            raise HTTPException(400, f"Rejected endpoint URL: {reason}")
                         ep.base_url = _new_base
             else:
                 ep.is_enabled = not ep.is_enabled
